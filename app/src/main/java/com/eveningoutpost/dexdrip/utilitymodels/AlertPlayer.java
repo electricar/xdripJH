@@ -2,6 +2,7 @@ package com.eveningoutpost.dexdrip.utilitymodels;
 
 import static com.eveningoutpost.dexdrip.Home.startWatchUpdaterService;
 import static com.eveningoutpost.dexdrip.models.JoH.delayedMediaPlayerRelease;
+import static com.eveningoutpost.dexdrip.models.JoH.pratelimit;
 import static com.eveningoutpost.dexdrip.models.JoH.setMediaDataSource;
 import static com.eveningoutpost.dexdrip.models.JoH.stopAndReleasePlayer;
 import static com.eveningoutpost.dexdrip.receiver.InfoContentProvider.ping;
@@ -56,24 +57,24 @@ import lombok.Getter;
 // A helper class to create the mediaplayer on the UI thread.
 // This is needed in order for the callbackst to work.
 class MediaPlayerCreaterHelper {
-    
-    private final static String TAG = AlertPlayer.class.getSimpleName();
+
+    private final static String TAG = MediaPlayerCreaterHelper.class.getSimpleName();
     private final Object creationThreadLock = new Object();
     private volatile boolean mplayerCreated_ = false;
     private volatile MediaPlayer mediaPlayer_ = null;
-    
+
     synchronized MediaPlayer createMediaPlayer(Context ctx) {
         if (isUiThread()) {
             return new MediaPlayer();
         }
-        
+
         mplayerCreated_ = false;
         mediaPlayer_ = null;
         Handler mainHandler = new Handler(ctx.getMainLooper());
 
         // TODO use JoH run on ui thread
         Runnable myRunnable = new Runnable() {
-            @Override 
+            @Override
             public void run() {
                 synchronized(creationThreadLock) {
                     try {
@@ -83,7 +84,7 @@ class MediaPlayerCreaterHelper {
                         mplayerCreated_ = true;
                         creationThreadLock.notifyAll();
                     }
-                    
+
                 }
             }
         };
@@ -96,13 +97,13 @@ class MediaPlayerCreaterHelper {
                 while(mplayerCreated_ == false) {
                     creationThreadLock.wait(30 * Constants.SECOND_IN_MS);
                 }
-            } 
-        }catch (InterruptedException e){
-             Log.e(TAG, "Cought exception", e);
+            }
+        } catch (InterruptedException e) {
+            Log.e(TAG, "Caught exception", e);
         }
         return mediaPlayer_;
     }
-    
+
     boolean isUiThread() {
         return Looper.myLooper() == Looper.getMainLooper();
     }
@@ -111,11 +112,10 @@ class MediaPlayerCreaterHelper {
 public class AlertPlayer {
 
     private volatile static AlertPlayer alertPlayerInstance;
-    @Getter
-    private volatile static long lastVolumeChange = 0;
     private final static String TAG = AlertPlayer.class.getSimpleName();
     private volatile MediaPlayer mediaPlayer = null;
     private final AudioManager manager = (AudioManager)xdrip.getAppContext().getSystemService(Context.AUDIO_SERVICE);
+    public static volatile String activeTag = ""; // Tag for the currently active sound or vibration event
     volatile int volumeBeforeAlert = -1;
     volatile int volumeForThisAlert = -1;
 
@@ -199,6 +199,7 @@ public class AlertPlayer {
     }
 
     public synchronized void stopAlert(Context ctx, boolean ClearData, boolean clearIfSnoozeFinished, boolean cancelNotification) {
+        activeTag = "";
 
         Log.d(TAG, "stopAlert: stop called ClearData " + ClearData + "  ThreadID " + Thread.currentThread().getId());
         if (ClearData) {
@@ -214,7 +215,7 @@ public class AlertPlayer {
             stopAndReleasePlayer(mediaPlayer);
             mediaPlayer = null;
         }
-        revertCurrentVolume(streamType);
+        revertCurrentVolume(streamType); // Make sure activeTag is set to empty before this line.
         releaseAudioFocus();
         ping("alarm");
     }
@@ -321,7 +322,7 @@ public class AlertPlayer {
             Log.d(TAG,"ClockTick: Playing the alert again");
             long nextAlertTime = alert.getNextAlertTime(ctx);
             activeBgAlert.updateNextAlertAt(nextAlertTime);
-            
+
             VibrateNotifyMakeNoise(ctx, alert, bgValue, minutesFromStartPlaying);
             AlertTracker.evaluate();
         }
@@ -329,21 +330,36 @@ public class AlertPlayer {
     }
 
 
-    protected synchronized void playFile(final Context ctx, final String fileName, final float volumeFrac, final boolean forceSpeaker, final boolean overrideSilentMode) {
+    protected synchronized void playFile(final Context ctx, final String fileName, final float volumeFrac, final boolean forceSpeaker, final boolean overrideSilentMode, final int priority, final String tag) {
+        int currentPriority = getPriority(activeTag);
+
+        // Case 1: BLOCKING (New sound is lower priority than the one currently making noise)
+        if (mediaPlayer != null && mediaPlayer.isPlaying() && currentPriority > priority) {
+            UserError.Log.e(TAG, tag + " ignored. " + activeTag + " (P" + currentPriority + ") is playing.");
+            return;
+        }
+
+        // Case 2: PREEMPTING (New sound is higher/equal priority and something is already active)
+        if (!activeTag.isEmpty()) {
+            UserError.Log.e(TAG, tag + " stopping audio/vibe for " + activeTag);
+            if (mediaPlayer != null) {
+                stopAndReleasePlayer(mediaPlayer);
+            }
+            JoH.cancelVibrate();
+        }
+
         Log.i(TAG, "playFile: called fileName = " + fileName);
         if (volumeFrac <= 0) {
             UserError.Log.e(TAG, "Not playing file " + fileName + " as requested volume is " + volumeFrac);
             return;
         }
 
-        if (mediaPlayer != null) {
-            Log.i(TAG, "ERROR, playFile sound already playing");
-            stopAndReleasePlayer(mediaPlayer);
-        }
+        activeTag = tag; // Set tag here so volume management knows an alert is active
 
         mediaPlayer = new MediaPlayerCreaterHelper().createMediaPlayer(ctx);
         if (mediaPlayer == null) {
             Log.wtf(TAG, "MediaPlayerCreaterHelper().createMediaPlayer failed !!");
+            activeTag = ""; // Clear the lock
             return;
         }
 
@@ -353,27 +369,72 @@ public class AlertPlayer {
 
         mediaPlayer.setOnCompletionListener(mp -> {
             Log.i(TAG, "playFile: onCompletion called (finished playing) ");
+            activeTag = "";
             delayedMediaPlayerRelease(mp);
             JoH.threadSleep(300);
-            revertCurrentVolume(streamType);
+            revertCurrentVolume(streamType); // Make sure activeTag is set to empty before this line.
             releaseAudioFocus();
         });
 
         mediaPlayer.setOnErrorListener((mp, what, extra) -> {
             Log.e(TAG, "playFile: onError called (what: " + what + ", extra: " + extra);
+            activeTag = "";
             // possibly media player error; release is handled in onCompletionListener
             return false;
         });
 
         boolean setDataSourceSucceeded = false;
-        if (fileName != null && fileName.length() > 0) {
+        boolean hasCustomFile = (fileName != null && fileName.length() > 0
+                && !fileName.equals("default")
+                && !fileName.equals("default_notification")
+                && !fileName.startsWith("content://settings/system/"));
+
+        if (hasCustomFile) { // We have a path to the sound file.
             setDataSourceSucceeded = setMediaDataSource(ctx, mediaPlayer, Uri.parse(fileName));
+            if (!setDataSourceSucceeded) {
+                UserError.Log.uel(TAG, "Sound URI failed. Path: " + fileName);
+            }
         }
-        if (!setDataSourceSucceeded) {
+
+        if (!setDataSourceSucceeded) { // The user may have chosen an item-specific default sound.
+            // If the item has a dedicated default sound file, it will be identified here.
+            // For now, the only item that may qualify is the reminder.  But, we may have more items here in the future for example sensor expiry.
+            if ("reminder".equals(tag)) {
+                setDataSourceSucceeded = setMediaDataSource(ctx, mediaPlayer, R.raw.reminder_default_notification);
+                if (!setDataSourceSucceeded) {
+                    UserError.Log.ueh(TAG, "Reminder default notification failed to load!");
+                }
+            }
+        }
+
+        if (!setDataSourceSucceeded) { // We still need to play the default sound.
+            // The user may have chosen a general default sound file.
+            if ("default_notification".equals(fileName)) {
+                setDataSourceSucceeded = setMediaDataSource(ctx, mediaPlayer, R.raw.default_notification);
+            }
+            else if ("default".equals(fileName) || (fileName != null && fileName.startsWith("content://settings/system/")) || "".equals(fileName) || fileName == null) {
+                setDataSourceSucceeded = setMediaDataSource(ctx, mediaPlayer, priority < 80 ? R.raw.default_notification : R.raw.default_alert);
+            }
+        }
+
+        if (!setDataSourceSucceeded) { // We still need to play the default sound.
+            // We will now play the default sound solely based on priority.
+            UserError.Log.uel(TAG, "Attempting sound fallback.");
+            setDataSourceSucceeded = setMediaDataSource(ctx, mediaPlayer, priority < 80 ? R.raw.default_notification : R.raw.default_alert);
+        }
+
+        if (!setDataSourceSucceeded) { // We have failed to play a sound based on priority.  This should not happen.
+            UserError.Log.ueh(TAG, "Attempting default_alert safety net.");
             setDataSourceSucceeded = setMediaDataSource(ctx, mediaPlayer, R.raw.default_alert);
         }
-        if (!setDataSourceSucceeded) {
-            Log.wtf(TAG, "setMediaDataSource failed - cannot play!");
+
+        if (!setDataSourceSucceeded) { // This is a disaster!  We have failed to make a sound.
+            Log.wtf(TAG, "FATAL: Default_alert sound failed to load!");
+            activeTag = ""; // Clear the lock
+            if (mediaPlayer != null) {
+                stopAndReleasePlayer(mediaPlayer);
+                mediaPlayer = null;
+            }
             return;
         }
 
@@ -391,8 +452,20 @@ public class AlertPlayer {
             mediaPlayer.prepareAsync();
         } catch (NullPointerException e) {
             Log.wtf(TAG, "Playfile: Concurrency related null pointer exception: " + e.toString());
+            handlePlaybackFailure();
         } catch (IllegalStateException e) {
             Log.wtf(TAG, "Playfile: Concurrency related illegal state exception: " + e.toString());
+            handlePlaybackFailure();
+        }
+    }
+
+    // Handle fatal synchronization failure exits
+    private void handlePlaybackFailure() {
+        activeTag = "";
+        releaseAudioFocus();
+        if (mediaPlayer != null) {
+            stopAndReleasePlayer(mediaPlayer);
+            mediaPlayer = null;
         }
     }
 
@@ -402,7 +475,10 @@ public class AlertPlayer {
             UserError.Log.wtf(TAG, "Cannot get max volume to adjust current volume!");
             return;
         }
-        volumeBeforeAlert = getVolume(streamType);
+        if (volumeBeforeAlert == -1) {
+            // Only record the volume before alert if an alert in progress hasn't done it already.
+            volumeBeforeAlert = getVolume(streamType);
+        }
         volumeForThisAlert = (int) (maxVolume * volumeFrac);
         Log.d(TAG, "before playing volumeBeforeAlert " + volumeBeforeAlert + " volumeForThisAlert " + volumeForThisAlert);
         // adjust volume if we are allowed and it needs adjusting
@@ -415,6 +491,10 @@ public class AlertPlayer {
     }
 
     private synchronized void revertCurrentVolume(final int streamType) {
+        if (!activeTag.isEmpty()) {
+            // Only revert the volume if we are the last alert.
+            return;
+        }
         final int currentVolume = getVolume(streamType);
         Log.d(TAG, "revertCurrentVolume volumeBeforeAlert " + volumeBeforeAlert + " volumeForThisAlert " + volumeForThisAlert
                 + " currentVolume " + currentVolume);
@@ -450,7 +530,6 @@ public class AlertPlayer {
             return;
         }
         try {
-            lastVolumeChange = JoH.tsl();
             manager.setStreamVolume(streamType, volume, 0);
             Log.d(TAG, "Adjusted volume to: " + volume);
         } catch (SecurityException e) {
@@ -460,8 +539,8 @@ public class AlertPlayer {
         }
     }
 
-    private PendingIntent notificationIntent(Context ctx, Intent intent){
-        return PendingIntent.getActivity(ctx, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT);
+    public PendingIntent notificationIntent(Context ctx, Intent intent){
+        return PendingIntent.getActivity(ctx, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
     }
     private PendingIntent snoozeIntent(Context ctx, int minsSinceStartPlaying){
@@ -499,7 +578,7 @@ public class AlertPlayer {
         return ALERT_PROFILE_ASCENDING;
 
     }
-    
+
     public static boolean isAscendingMode(Context ctx){
         Log.d(TAG, "(getAlertProfile(ctx) == ALERT_PROFILE_ASCENDING): " + (getAlertProfile(ctx) == ALERT_PROFILE_ASCENDING));
         return getAlertProfile(ctx) == ALERT_PROFILE_ASCENDING;
@@ -510,8 +589,14 @@ public class AlertPlayer {
     }
 
     protected void VibrateNotifyMakeNoise(Context context, AlertType alert, String bgValue, int minsFromStartPlaying) {
+        String tag = "high_glucose_level";
+        if (!alert.above) {
+            tag = "low_glucose_level";
+        }
+        int priority = getPriority(tag);
+
         Log.d(TAG, "VibrateNotifyMakeNoise called minsFromStartedPlaying = " + minsFromStartPlaying);
-        Log.d("ALARM", "setting vibrate alarm");
+        Log.d(TAG, "setting vibrate alarm");
         int profile = getAlertProfile(context);
         if (alert.uuid.equals(AlertType.LOW_ALERT_55)) {
             // boost alerts...
@@ -545,13 +630,16 @@ public class AlertPlayer {
                 .setPriority(Pref.getBooleanDefaultFalse("high_priority_notifications") ? Notification.PRIORITY_MAX : Notification.PRIORITY_HIGH)
                 .setDeleteIntent(snoozeIntent(context, minsFromStartPlaying));
         if (Pref.getBoolean("show_buttons_in_alerts", true)) {
-             builder.addAction(
+            builder.addAction(
                     R.drawable.alert_icon,
                     context.getString(R.string.snooze_alert),
                     snoozeIntent(context, minsFromStartPlaying)
             );
         }
         boolean overrideSilent = alert.override_silent_mode;
+        // We are going to create a log now corresponding to a notification that will be created.  It may be silent due to the volume profile or DND.
+        // Regardless, the log needs to be created.
+        Log.ueh(TAG, contentLog); // Glucose level alert log
         if (profile != ALERT_PROFILE_VIBRATE_ONLY && profile != ALERT_PROFILE_SILENT) {
             float volumeFrac = (float) (minsFromStartPlaying - MAX_VIBRATING_MINUTES) / (MAX_ASCENDING_MINUTES - MAX_VIBRATING_MINUTES);
             // While minsFromStartPlaying <= MAX_VIBRATING_MINUTES, we only vibrate ...
@@ -578,30 +666,35 @@ public class AlertPlayer {
 
             if (notSilencedDueToCall()) {
                 if (overrideSilent || isLoudPhone(context)) {
-                    playFile(context, alert.mp3_file, volumeFrac, forceSpeaker, overrideSilent);
+                    playFile(context, alert.mp3_file, volumeFrac, forceSpeaker, overrideSilent, priority, tag);
+                } else if (pratelimit("silent-alert-log", 1200)) {
+                    // Log why the notification is silent
+                    UserError.Log.uel(TAG, "No " + tag + " in silent mode");
                 }
             } else {
-                Log.i(TAG, "Silenced Alert Noise due to ongoing call");
+                Log.i(TAG, "No sound due to ongoing call");
             }
         }
         if (profile != ALERT_PROFILE_SILENT && alert.vibrate) {
             if (notSilencedDueToCall()) {
-                // if using custom vibration...
-                if (alert.vibration_pattern != null && alert.vibration_pattern.length() > 0) {
-                    customVibration(context, alert.vibration_pattern);
-                } else {
-                    builder.setVibrate(Notifications.vibratePattern);
+                if (alert.override_silent_mode || (manager != null && manager.getRingerMode() != AudioManager.RINGER_MODE_SILENT)) {
+                    // if using custom vibration...
+                    if (alert.vibration_pattern != null && alert.vibration_pattern.length() > 0) {
+                        customVibration(context, alert.vibration_pattern);
+                    } else {
+                        JoH.vibrateInternal(Notifications.vibratePattern, priority, tag);
+                    }
                 }
             } else {
-                Log.i(TAG, "Vibration silenced due to ongoing call");
+                Log.i(TAG, "No vibration due to ongoing call");
             }
-        } else {
-            // In order to still show on all android wear watches, either a sound or a vibrate pattern
-            // seems to be needed. This pattern basically does not vibrate:
-            //builder.setVibrate(new long[]{1, 0}); // changed to use customVibration as it appears to trigger the default notification vibration
-            customVibration(context, "0");
         }
-        Log.ueh("Alerting", contentLog);
+        if (profile == ALERT_PROFILE_SILENT && pratelimit("silent-alert-log", 1200)) {
+            // Log why the notification is silent
+            UserError.Log.uel(TAG, "No " + tag + " with silent volume profile");
+        }
+        // Let's keep this dummy pattern so the notification still mirrors to watches
+        builder.setVibrate(new long[]{1, 0});
         final NotificationManager mNotifyMgr = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         //mNotifyMgr.cancel(Notifications.exportAlertNotificationId); // this appears to confuse android wear version 2.0.0.141773014.gms even though it shouldn't - can we survive without this?
         mNotifyMgr.notify(Notifications.exportAlertNotificationId, XdripNotificationCompat.build(builder));
@@ -690,5 +783,84 @@ public class AlertPlayer {
         }
         final int indexInPatternToRepeat = -1;
         vibrator.vibrate(vibPatternLong, indexInPatternToRepeat);
+    }
+
+    public synchronized void triggerSoundAndVibration(Context context, boolean sound, String soundUri, boolean overrideSilent, float minVolume, String type, boolean vibrate, long[] vibratePattern) {
+        // This is where we create sound and vibration for Other alerts as well as for some other notification.
+
+        int priority = getPriority(type);
+
+        if (!notSilencedDueToCall()) {
+            activeTag = "";
+            return;
+        }
+
+        int profile = getAlertProfile(context);
+        if (profile == ALERT_PROFILE_SILENT) {
+            activeTag = "";
+            if (priority > 70) {
+                UserError.Log.uel(TAG, "No " + type + " with silent volume profile");
+            }
+            return;
+        }
+
+        AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        boolean isSilentMode = am != null && am.getRingerMode() == AudioManager.RINGER_MODE_SILENT;
+        boolean isVibrateMode = am != null && am.getRingerMode() == AudioManager.RINGER_MODE_VIBRATE;
+
+        if (vibrate && (overrideSilent || !isSilentMode)) {
+            JoH.vibrateInternal(vibratePattern, priority, type);
+        }
+
+        if (sound && profile != ALERT_PROFILE_VIBRATE_ONLY && (overrideSilent || (!isSilentMode && !isVibrateMode))) {
+            int stream = overrideSilent ? AudioManager.STREAM_ALARM : AudioManager.STREAM_MUSIC;
+            int maxVol = getMaxVolume(stream);
+            float volumeFrac = maxVol > 0 ? (float) getVolume(stream) / maxVol : minVolume;
+
+            if (volumeFrac < minVolume && (overrideSilent || volumeFrac > 0)) {
+                volumeFrac = minVolume;
+            }
+
+            if (volumeFrac > 0) {
+                playFile(context, soundUri, volumeFrac, overrideSilent, overrideSilent, priority, type);
+                ping("alarm");
+            } else {
+                activeTag = "";
+            }
+        } else {
+            // No sound will play, so reset priority now so the gate doesn't stay locked.
+            activeTag = "";
+            if (priority > 70) {
+                UserError.Log.uel(TAG, "No " + type + " in silent mode");
+            }
+        }
+    }
+
+    /**
+     * Determines priority for audio and vibration preemption.
+     * Higher values prevent lower-priority sounds and haptics from
+     * interrupting, but this does not affect snoozing or dismissing.
+     * @param tag The identifier for the alert type.
+     * @return Priority value; higher takes precedence.
+     */
+    public static int getPriority(String tag) {
+        if (tag == null || tag.isEmpty()) return 0;
+        String t = tag.toLowerCase();
+        if (t.contains("bg_missed_alerts")) return 95;
+        if (t.contains("low_glucose_level")) return 90;
+        if (t.contains("persistent_high_alert")) return 87;
+        if (t.contains("high_glucose_level")) return 85;
+        if (t.contains("bg_predict_alert")) return 80;
+        // The default sound for the items above this line is our default alarm sound.
+        // The default sound for the items below this line is our default notification sound.
+        if (t.contains("bg_fall_alert") || t.contains("bg_rise_alert")) return 75;
+        // If the phone is in DND and override silent mode is not enabled for an item above this line, we create a trigger log.
+        if (t.contains("sensor_expiry")) return 60;
+        if (t.contains("bluereader alarm")) return 50;
+        if (t.contains("bg_unclear_readings_alert")) return 40;
+        if (t.contains("reminder")) return 30;
+        if (t.contains("ob1_session_restart")) return 20;
+        if (t.contains("general_notification")) return 10;
+        return 5;
     }
 }
