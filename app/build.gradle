@@ -181,6 +181,11 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'),
                     'proguard-rules.pro'
             signingConfig signingConfigs.release
+            // optional: -PappIdSuffix=.l3 installs next to an existing xDrip instead of replacing it
+            if (project.hasProperty('appIdSuffix')) {
+                applicationIdSuffix project.property('appIdSuffix')
+                versionNameSuffix project.property('appIdSuffix')
+            }
         }
         debug {
             minifyEnabled true

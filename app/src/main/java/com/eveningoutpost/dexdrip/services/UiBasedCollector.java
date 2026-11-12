@@ -58,6 +58,9 @@ public class UiBasedCollector extends NotificationListenerService {
     private static final String TAG = UiBasedCollector.class.getSimpleName();
     private static final String UI_BASED_STORE_LAST_VALUE = "UI_BASED_STORE_LAST_VALUE";
     private static final String UI_BASED_STORE_LAST_REPEAT = "UI_BASED_STORE_LAST_REPEAT";
+    private static final String UI_BASED_STORE_LAST_PACKAGE = "UI_BASED_STORE_LAST_PACKAGE";
+    private static final String LIBRE3_PACKAGE_PREFIX = "com.freestylelibre3.app"; // all regional variants (.de, .fr, .it, ...)
+    private static volatile Boolean libre3SourceCached = null;
     private static final String COMPANION_APP_IOB_ENABLED_PREFERENCE_KEY = "fetch_iob_from_companion_app";
     private static final String ENABLED_NOTIFICATION_LISTENERS = "enabled_notification_listeners";
     private static final String ACTION_NOTIFICATION_LISTENER_SETTINGS = "android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS";
@@ -161,11 +164,12 @@ public class UiBasedCollector extends NotificationListenerService {
     @Override
     public void onNotificationPosted(final StatusBarNotification sbn) {
         val fromPackage = sbn.getPackageName();
-        if (coOptedPackages.contains(fromPackage)) {
+        if (coOptedPackages.contains(fromPackage) || isLibre3Package(fromPackage)) {
             if (getDexCollectionType() == UiBased) {
                 UserError.Log.d(TAG, "Notification from: " + fromPackage);
                 if (sbn.isOngoing() || coOptedPackagesAll.contains(fromPackage)) {
                     lastPackage = fromPackage;
+                    rememberSourcePackage(fromPackage);
                     processNotification(sbn.getNotification());
                     BlueTails.immortality();
                 }
@@ -414,7 +418,9 @@ public class UiBasedCollector extends NotificationListenerService {
                 } else {
                     UserError.Log.d(TAG, "Inserting new value");
                     PersistentStore.setLong(UI_BASED_STORE_LAST_VALUE, mgdl);
-                    val bgr = BgReading.bgReadingInsertFromG5(mgdl, timestamp);
+                    val bgr = isLibre3Package(lastPackage)
+                            ? BgReading.bgReadingInsertFromG5(mgdl, timestamp, "Libre3 Companion", LIBRE3_MIN_SPACING_MS)
+                            : BgReading.bgReadingInsertFromG5(mgdl, timestamp);
                     if (bgr != null) {
                         bgr.find_slope();
                         bgr.noRawWillBeAvailable();
@@ -461,6 +467,9 @@ public class UiBasedCollector extends NotificationListenerService {
     private int jamThreshold() {
         if (lastPackage != null) {
             if (lastPackage.startsWith("com.medtronic")) return 9;
+            // Libre 3 posts a new value every minute; a stable glucose easily repeats
+            // the same number for 10-20 minutes, so only treat ~45 min of identical values as jammed
+            if (isLibre3Package(lastPackage)) return 45;
         }
         return 6;
     }
@@ -535,5 +544,32 @@ public class UiBasedCollector extends NotificationListenerService {
             }
         }
         return false;
+    }
+
+    // ---- Libre 3 companion support (1 minute values, local only) ----
+
+    // Libre 3 sends every ~60s but jitter of 58-62s is normal, so allow readings 30s apart
+    private static final long LIBRE3_MIN_SPACING_MS = 30_000;
+
+    public static boolean isLibre3Package(final String pkg) {
+        return pkg != null && pkg.startsWith(LIBRE3_PACKAGE_PREFIX);
+    }
+
+    private static void rememberSourcePackage(final String pkg) {
+        final boolean isLibre3 = isLibre3Package(pkg);
+        if (libre3SourceCached == null || libre3SourceCached != isLibre3) {
+            PersistentStore.setString(UI_BASED_STORE_LAST_PACKAGE, pkg);
+            libre3SourceCached = isLibre3;
+        }
+    }
+
+    // true when the companion source we last collected from is a Libre 3 app -> 1 minute sample period
+    public static boolean isLibre3Source() {
+        Boolean cached = libre3SourceCached;
+        if (cached == null) {
+            cached = isLibre3Package(PersistentStore.getString(UI_BASED_STORE_LAST_PACKAGE));
+            libre3SourceCached = cached;
+        }
+        return cached;
     }
 }

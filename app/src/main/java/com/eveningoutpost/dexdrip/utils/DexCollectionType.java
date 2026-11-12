@@ -390,6 +390,8 @@ public enum DexCollectionType {
             case NSFollow:
                 long samplePeriodInMinutes = Pref.getStringToInt("nsfollow_sample_period_in_minutes", 5);
                 return Constants.MINUTE_IN_MS * Math.max(1, samplePeriodInMinutes);
+            case UiBased:
+                return com.eveningoutpost.dexdrip.services.UiBasedCollector.isLibre3Source() ? 60_000 : 300_000;
             case Mock:
                 int mockInterval = Pref.getInt(MockDataSource.PREF_INTERVAL, 5) ;
                 return mockInterval * Constants.MINUTE_IN_MS;

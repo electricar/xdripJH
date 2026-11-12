@@ -1169,6 +1169,11 @@ public class BgReading extends Model implements ShareUploadableBg {
                        // TODO can these methods be unified to reduce duplication
                                                                // TODO remember to sync this with wear code base
     public static synchronized BgReading bgReadingInsertFromG5(double calculated_value, final long timestamp, String sourceInfoAppend) {
+        return bgReadingInsertFromG5(calculated_value, timestamp, sourceInfoAppend, Constants.MINUTE_IN_MS);
+    }
+
+    // minSpacingMs: a reading closer than this to an existing one is treated as a duplicate
+    public static synchronized BgReading bgReadingInsertFromG5(double calculated_value, final long timestamp, String sourceInfoAppend, final long minSpacingMs) {
 
         final Sensor sensor = Sensor.currentSensor();
         if (sensor == null) {
@@ -1176,7 +1181,7 @@ public class BgReading extends Model implements ShareUploadableBg {
             return null;
         }
         // TODO slope!!
-        final BgReading existing = getForPreciseTimestamp(timestamp, Constants.MINUTE_IN_MS);
+        final BgReading existing = getForPreciseTimestamp(timestamp, minSpacingMs);
         if (existing == null) {
             final BgReading bgr = new BgReading();
             bgr.sensor = sensor;
