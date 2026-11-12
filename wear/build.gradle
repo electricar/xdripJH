@@ -70,6 +70,10 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android.txt'),
                     'proguard-rules.pro'
+            // keep the embedded wear app's package name in step with the phone app
+            if (project.hasProperty('appIdSuffix')) {
+                applicationIdSuffix project.property('appIdSuffix')
+            }
         }
     }
 
