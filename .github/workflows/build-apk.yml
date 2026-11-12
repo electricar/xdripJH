@@ -46,7 +46,12 @@ jobs:
       - name: Build
         run: |
           EXTRA=""
-          if [ "${{ inputs.side_by_side }}" != "false" ]; then EXTRA="-PappIdSuffix=.l3"; fi
+          if [ "${{ inputs.side_by_side }}" != "false" ]; then
+            EXTRA="-PappIdSuffix=.l3"
+            # google-services.json needs an entry for the suffixed package name
+            jq '.client += [(.client[0] | .client_info.android_client_info.package_name += ".l3")]' \
+              app/google-services.json > "$RUNNER_TEMP/gs.json" && cp "$RUNNER_TEMP/gs.json" app/google-services.json
+          fi
           ./gradlew :app:assembleProdRelease $EXTRA --no-daemon
 
       - uses: actions/upload-artifact@v4
