@@ -468,8 +468,8 @@ public class UiBasedCollector extends NotificationListenerService {
         if (lastPackage != null) {
             if (lastPackage.startsWith("com.medtronic")) return 9;
             // Libre 3 posts a new value every minute; a stable glucose easily repeats
-            // the same number for 10-20 minutes, so only treat ~45 min of identical values as jammed
-            if (isLibre3Package(lastPackage)) return 45;
+            // the same number for 10-20 minutes, so only treat ~35 min of identical values as jammed
+            if (isLibre3Package(lastPackage)) return 35;
         }
         return 6;
     }

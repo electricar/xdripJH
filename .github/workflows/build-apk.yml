@@ -1,6 +1,8 @@
 name: Build APK
 
 on:
+  push:
+    branches: [ libre3-companion ]
   workflow_dispatch:
     inputs:
       side_by_side:
@@ -44,7 +46,7 @@ jobs:
       - name: Build
         run: |
           EXTRA=""
-          if [ "${{ inputs.side_by_side }}" = "true" ]; then EXTRA="-PappIdSuffix=.l3"; fi
+          if [ "${{ inputs.side_by_side }}" != "false" ]; then EXTRA="-PappIdSuffix=.l3"; fi
           ./gradlew :app:assembleProdRelease $EXTRA --no-daemon
 
       - uses: actions/upload-artifact@v4
